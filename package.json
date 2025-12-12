@@ -1,13 +1,17 @@
 {
   "name": "base44-app",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.4.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "version:major": "node ../scripts/auto-version.js major",
+    "version:minor": "node ../scripts/auto-version.js minor",
+    "version:patch": "node ../scripts/auto-version.js patch",
+    "version:auto": "node ../scripts/auto-version.js"
   },
   "dependencies": {
     "@base44/sdk": "^0.1.2",

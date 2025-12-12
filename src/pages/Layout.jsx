@@ -1,7 +1,4 @@
-// Version S-PostBO
-const APP_VERSION = '2.4.0';
-
-export default function Layout({ children }) {
+export default function Layout({ children, currentPageName }) {
     return (
         <div className="min-h-screen">
             {children}

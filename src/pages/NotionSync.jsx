@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,13 +9,23 @@ import { Switch } from "@/components/ui/switch";
 import {
     RefreshCw, Database, Link2, Check, X, AlertCircle, 
     FileText, Calendar, Clock, Loader2, ExternalLink,
-    Settings, ChevronRight, Trash2, Plus, Info
+    Settings, ChevronRight, Trash2, Plus, Info, MapPin,
+    Search, Filter, ChevronLeft, ChevronDown, Edit2
 } from "lucide-react";
-import { format } from 'date-fns';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
+import { format, formatDistanceToNow, subDays } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import { toast } from 'sonner';
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import Sidebar from '../components/dashboard/Sidebar';
-import { notionApiCall, checkExtensionAvailable } from '@/utils/spost-api';
+import { notionApiCall, checkExtensionAvailable, publishPostNow } from '@/utils/spost-api';
+import NotionPostEditor from '../components/NotionPostEditor';
 
 // Logo Notion SVG
 const NotionLogo = ({ className }) => (
@@ -25,8 +36,10 @@ const NotionLogo = ({ className }) => (
 );
 
 export default function NotionSync() {
+    const navigate = useNavigate();
     const [isConnected, setIsConnected] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
+    const [isLoadingPosts, setIsLoadingPosts] = useState(false);
     const [isLoadingDatabases, setIsLoadingDatabases] = useState(false);
     const [isSyncing, setIsSyncing] = useState(false);
     const [notionToken, setNotionToken] = useState('');
@@ -37,10 +50,27 @@ export default function NotionSync() {
         lastSync: null,
         autoSync: false,
         syncInterval: 30, // minutes
+        fieldMapping: {
+            title: '',
+            content: '',
+            status: '',
+            publishDate: '',
+        },
     });
     const [databases, setDatabases] = useState([]);
     const [selectedDatabase, setSelectedDatabase] = useState(null);
+    const [databaseProperties, setDatabaseProperties] = useState([]);
+    const [isLoadingProperties, setIsLoadingProperties] = useState(false);
+    const [showMapping, setShowMapping] = useState(false);
     const [syncedPosts, setSyncedPosts] = useState([]);
+    const [allNotionPosts, setAllNotionPosts] = useState([]); // Tous les posts pour la liste complète
+    const [searchQuery, setSearchQuery] = useState('');
+    const [sortBy, setSortBy] = useState('date');
+    const [sortOrder, setSortOrder] = useState('desc');
+    const [periodFilter, setPeriodFilter] = useState('all'); // all, week, month, quarter, year
+    const [currentPage, setCurrentPage] = useState(1);
+    const [itemsPerPage, setItemsPerPage] = useState(10);
+    const [statusFilter, setStatusFilter] = useState('all'); // all, draft, scheduled, published
     const [syncStats, setSyncStats] = useState({
         totalPosts: 0,
         drafts: 0,
@@ -48,10 +78,71 @@ export default function NotionSync() {
         published: 0,
     });
     const [error, setError] = useState(null);
+    const [editingPost, setEditingPost] = useState(null);
+    const [profile, setProfile] = useState(null);
+    const [isTestPublishing, setIsTestPublishing] = useState(false);
 
     useEffect(() => {
         loadNotionConfig().catch(console.error);
+        loadProfile();
     }, []);
+
+    const loadProfile = async () => {
+        try {
+            // Méthode 1: Vérifier via l'API de l'extension
+            const api = window.SPost || window.LinkedInPlanner;
+            if (api && api.getData) {
+                try {
+                    const data = await api.getData();
+                    if (data && data.profile) {
+                        const profileData = data.profile;
+                        // Le profil est déjà formaté par getLinkedInData() dans background.js
+                        setProfile({
+                            firstName: profileData.firstName || '',
+                            lastName: profileData.lastName || '',
+                            headline: profileData.headline || profileData.occupation || '',
+                            publicIdentifier: profileData.publicIdentifier || '',
+                            picture: profileData.picture || null,
+                            name: profileData.name || (profileData.firstName && profileData.lastName 
+                                ? `${profileData.firstName} ${profileData.lastName}`.trim()
+                                : profileData.firstName || profileData.lastName || ''),
+                            profileUrl: profileData.profileUrl || null,
+                        });
+                        console.log('[NotionSync] ✅ Profil LinkedIn chargé depuis l\'extension:', {
+                            name: profileData.name || `${profileData.firstName} ${profileData.lastName}`.trim(),
+                            hasPicture: !!profileData.picture,
+                        });
+                        return;
+                    }
+                } catch (e) {
+                    console.warn('[NotionSync] Erreur API extension pour profil:', e);
+                }
+            }
+            
+            // Méthode 2: Fallback localStorage
+            const profileData = localStorage.getItem('spost_linkedin_data');
+            if (profileData) {
+                const data = JSON.parse(profileData);
+                const profile = data.profile || data;
+                if (profile) {
+                    setProfile({
+                        firstName: profile.firstName || '',
+                        lastName: profile.lastName || '',
+                        headline: profile.headline || profile.occupation || '',
+                        publicIdentifier: profile.publicIdentifier || '',
+                        picture: profile.picture || null,
+                        name: profile.name || (profile.firstName && profile.lastName 
+                            ? `${profile.firstName} ${profile.lastName}`.trim()
+                            : profile.firstName || profile.lastName || ''),
+                        profileUrl: profile.profileUrl || null,
+                    });
+                    console.log('[NotionSync] ✅ Profil LinkedIn chargé depuis localStorage');
+                }
+            }
+        } catch (e) {
+            console.error('Erreur chargement profil:', e);
+        }
+    };
 
     const loadNotionConfig = async () => {
         const saved = localStorage.getItem('spost_notion_config');
@@ -72,7 +163,16 @@ export default function NotionSync() {
                     }
                 }
                 if (config.databaseId) {
-                    loadSyncedPosts();
+                    // Charger les posts Notion sauvegardés depuis localStorage
+                    loadNotionPostsFromStorage();
+                    // Charger le schéma de la base de données (sans bloquer)
+                    setTimeout(() => {
+                        loadDatabaseSchema(config.databaseId, config.accessToken).catch((err) => {
+                            console.error('[NotionSync] Erreur chargement schéma au démarrage:', err);
+                            // Ne pas bloquer si le schéma ne se charge pas
+                        });
+                        loadSyncedPosts().catch(console.error);
+                    }, 1000);
                 }
             } catch (e) {
                 console.error('Erreur lors du chargement de la config Notion:', e);
@@ -83,6 +183,226 @@ export default function NotionSync() {
     const saveNotionConfig = (config) => {
         localStorage.setItem('spost_notion_config', JSON.stringify(config));
         setNotionConfig(config);
+    };
+
+    // Charger les posts Notion depuis localStorage
+    const loadNotionPostsFromStorage = () => {
+        try {
+            const saved = localStorage.getItem('spost_notion_posts');
+            if (saved) {
+                const posts = JSON.parse(saved);
+                setAllNotionPosts(posts);
+                setSyncedPosts(posts.slice(0, 10)); // Pour la vue d'aperçu
+                setSyncStats({
+                    totalPosts: posts.length,
+                    drafts: posts.filter(p => p.status === 'draft').length,
+                    scheduled: posts.filter(p => p.status === 'scheduled').length,
+                    published: posts.filter(p => p.status === 'published').length,
+                });
+            }
+        } catch (e) {
+            console.error('Erreur lors du chargement des posts Notion:', e);
+        }
+    };
+
+    // Filtrer et trier les posts Notion
+    const filteredNotionPosts = useMemo(() => {
+        let result = [...allNotionPosts];
+        
+        // Filtrer par statut
+        if (statusFilter !== 'all') {
+            result = result.filter(post => post.status === statusFilter);
+        }
+        
+        // Filtrer par période
+        if (periodFilter !== 'all') {
+            const now = new Date();
+            const daysMap = { week: 7, month: 30, quarter: 90, year: 365 };
+            const days = daysMap[periodFilter] || 0;
+            const cutoffDate = subDays(now, days);
+            
+            result = result.filter(post => {
+                if (!post.createdAt) return false;
+                try {
+                    const postDate = new Date(post.createdAt);
+                    if (isNaN(postDate.getTime())) return false;
+                    return postDate >= cutoffDate;
+                } catch {
+                    return false;
+                }
+            });
+        }
+        
+        // Filtrer par recherche
+        if (searchQuery) {
+            const query = searchQuery.toLowerCase();
+            result = result.filter(post => 
+                (post.content?.toLowerCase().includes(query) ||
+                 post.title?.toLowerCase().includes(query))
+            );
+        }
+        
+        // Trier
+        result.sort((a, b) => {
+            let comparison = 0;
+            
+            switch (sortBy) {
+                case 'date':
+                    const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                    const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                    comparison = dateB - dateA;
+                    break;
+                case 'title':
+                    comparison = (a.title || '').localeCompare(b.title || '');
+                    break;
+                case 'status':
+                    const statusOrder = { draft: 1, scheduled: 2, published: 3 };
+                    comparison = (statusOrder[a.status] || 0) - (statusOrder[b.status] || 0);
+                    break;
+                default:
+                    comparison = 0;
+            }
+            
+            return sortOrder === 'asc' ? -comparison : comparison;
+        });
+        
+        return result;
+    }, [allNotionPosts, searchQuery, sortBy, sortOrder, periodFilter, statusFilter]);
+
+    // Pagination
+    const totalPages = Math.ceil(filteredNotionPosts.length / itemsPerPage);
+    const paginatedNotionPosts = useMemo(() => {
+        const startIndex = (currentPage - 1) * itemsPerPage;
+        return filteredNotionPosts.slice(startIndex, startIndex + itemsPerPage);
+    }, [filteredNotionPosts, currentPage, itemsPerPage]);
+
+    // Reset page when filters change
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchQuery, periodFilter, statusFilter, itemsPerPage]);
+
+    const goToPage = (page) => {
+        if (page >= 1 && page <= totalPages) {
+            setCurrentPage(page);
+        }
+    };
+
+    // Sauvegarder les posts Notion dans localStorage
+    const saveNotionPostsToStorage = (posts) => {
+        try {
+            localStorage.setItem('spost_notion_posts', JSON.stringify(posts));
+        } catch (e) {
+            console.error('Erreur lors de la sauvegarde des posts Notion:', e);
+        }
+    };
+
+    // Charger le schéma de la base de données Notion
+    const loadDatabaseSchema = async (databaseId, token = null) => {
+        const accessToken = token || notionConfig.accessToken;
+        if (!databaseId || !accessToken) {
+            console.warn('[NotionSync] Impossible de charger le schéma: databaseId ou token manquant');
+            return;
+        }
+
+        setIsLoadingProperties(true);
+        setError(null);
+
+        try {
+            const extensionAvailable = await checkExtensionAvailable();
+            if (!extensionAvailable) {
+                throw new Error('Extension S-Post non détectée. Rechargez l\'extension et actualisez la page.');
+            }
+
+            console.log('[NotionSync] Chargement du schéma de la base de données...');
+            
+            const response = await notionApiCall(
+                `databases/${databaseId}`,
+                'GET',
+                null,
+                accessToken
+            );
+
+            if (!response || !response.success) {
+                const errorMsg = response?.error || 'Erreur lors du chargement du schéma';
+                console.error('[NotionSync] Erreur API:', errorMsg);
+                throw new Error(errorMsg);
+            }
+
+            const database = response.data;
+            if (!database || !database.properties) {
+                console.warn('[NotionSync] Base de données sans propriétés');
+                setDatabaseProperties([]);
+                return;
+            }
+
+            const properties = [];
+
+            // Extraire toutes les propriétés de la base de données
+            try {
+                for (const [key, prop] of Object.entries(database.properties)) {
+                    if (!key || !prop) continue;
+                    properties.push({
+                        id: key,
+                        name: key,
+                        type: prop.type || 'unknown',
+                        options: prop.type === 'select' ? (prop.select?.options || []) : 
+                                 prop.type === 'multi_select' ? (prop.multi_select?.options || []) : [],
+                    });
+                }
+            } catch (parseError) {
+                console.error('[NotionSync] Erreur lors du parsing des propriétés:', parseError);
+                throw new Error('Erreur lors de l\'extraction des propriétés de la base de données');
+            }
+
+            setDatabaseProperties(properties);
+            console.log(`[NotionSync] ${properties.length} propriétés détectées`);
+
+            // Si pas de mapping sauvegardé, proposer des mappings par défaut
+            try {
+                const currentConfig = JSON.parse(localStorage.getItem('spost_notion_config') || '{}');
+                if (!currentConfig.fieldMapping || !currentConfig.fieldMapping.title) {
+                    // Chercher le champ "Post" en priorité pour le contenu
+                    const postField = properties.find(p => 
+                        p.name.toLowerCase() === 'post' || 
+                        p.name.toLowerCase() === 'contenu' ||
+                        p.name.toLowerCase() === 'content'
+                    );
+                    
+                    const defaultMapping = {
+                        title: properties.find(p => p.type === 'title')?.id || '',
+                        content: postField?.id || properties.find(p => 
+                            p.type === 'rich_text' || 
+                            (p.type === 'title' && !properties.find(t => t.type === 'title' && t.id === p.id))
+                        )?.id || '',
+                        status: properties.find(p => p.type === 'select' && 
+                            (p.name.toLowerCase().includes('status') || 
+                             p.name.toLowerCase().includes('statut')))?.id || '',
+                        publishDate: properties.find(p => p.type === 'date' && 
+                            (p.name.toLowerCase().includes('date') || 
+                             p.name.toLowerCase().includes('publish')))?.id || '',
+                    };
+                    
+                    if (defaultMapping.title || defaultMapping.content) {
+                        const newConfig = {
+                            ...currentConfig,
+                            fieldMapping: defaultMapping,
+                        };
+                        saveNotionConfig(newConfig);
+                    }
+                }
+            } catch (configError) {
+                console.error('[NotionSync] Erreur lors de la configuration du mapping:', configError);
+                // Ne pas bloquer si le mapping par défaut échoue
+            }
+        } catch (error) {
+            console.error('[NotionSync] Erreur lors du chargement du schéma:', error);
+            const errorMessage = error.message || 'Erreur lors du chargement du schéma';
+            setError(errorMessage);
+            toast.error(errorMessage);
+            // Ne pas vider les propriétés existantes en cas d'erreur
+        } finally {
+            setIsLoadingProperties(false);
+        }
     };
 
     const handleConnect = async () => {
@@ -246,42 +566,224 @@ export default function NotionSync() {
         }
     };
 
-    const selectDatabase = (db) => {
+    const selectDatabase = async (db) => {
         setSelectedDatabase(db);
         const newConfig = {
             ...notionConfig,
             databaseId: db.id,
         };
         saveNotionConfig(newConfig);
-        loadSyncedPosts();
+        // Charger le schéma de la base de données
+        await loadDatabaseSchema(db.id, newConfig.accessToken);
+        // Charger les posts sauvegardés
+        loadNotionPostsFromStorage();
+        // Synchroniser avec Notion
+        await loadSyncedPosts();
     };
 
-    const loadSyncedPosts = () => {
-        // Charger les posts depuis localStorage ou Notion
-        const posts = JSON.parse(localStorage.getItem('spost_posts') || '[]');
-        setSyncedPosts(posts.slice(0, 10));
-        setSyncStats({
-            totalPosts: posts.length,
-            drafts: posts.filter(p => p.status === 'draft').length,
-            scheduled: posts.filter(p => p.status === 'scheduled').length,
-            published: posts.filter(p => !p.status || p.status === 'published').length,
-        });
+    const loadSyncedPosts = async () => {
+        // Récupérer uniquement les posts depuis Notion (pas depuis LinkedIn)
+        if (!selectedDatabase || !notionConfig.accessToken) {
+            setSyncedPosts([]);
+            setSyncStats({
+                totalPosts: 0,
+                drafts: 0,
+                scheduled: 0,
+                published: 0,
+            });
+            return;
+        }
+
+        try {
+            setIsLoadingPosts(true);
+            setError(null);
+            
+            // Recharger le profil LinkedIn à chaque chargement
+            await loadProfile();
+
+            // Vérifier que l'extension est disponible
+            const extensionAvailable = await checkExtensionAvailable();
+            if (!extensionAvailable) {
+                throw new Error('Extension S-Post non détectée');
+            }
+
+            // Interroger la base de données Notion pour récupérer les pages
+            console.log('[NotionSync] Récupération des pages depuis Notion...');
+            
+            const response = await notionApiCall(
+                `databases/${selectedDatabase.id}/query`,
+                'POST',
+                {
+                    page_size: 100, // Récupérer jusqu'à 100 pages
+                },
+                notionConfig.accessToken
+            );
+
+            if (!response || !response.success) {
+                const errorMsg = response?.error || 'Erreur lors de la récupération des pages Notion';
+                throw new Error(errorMsg);
+            }
+
+            const data = response.data;
+            const notionPages = data.results || [];
+            const mapping = notionConfig.fieldMapping || {};
+
+            // Transformer les pages Notion en format de posts en utilisant le mapping
+            const posts = notionPages.map(page => {
+                let title = 'Sans titre';
+                let content = '';
+                let status = 'draft';
+                let publishDate = null;
+
+                // Utiliser le mapping pour extraire les valeurs
+                if (page.properties) {
+                    // Titre
+                    if (mapping.title && page.properties[mapping.title]) {
+                        const prop = page.properties[mapping.title];
+                        if (prop.type === 'title' && prop.title) {
+                            title = prop.title.map(t => t.plain_text).join('');
+                        }
+                    }
+
+                    // Contenu - supporter différents types
+                    if (mapping.content && page.properties[mapping.content]) {
+                        const prop = page.properties[mapping.content];
+                        if (prop.type === 'rich_text' && prop.rich_text) {
+                            content = prop.rich_text.map(t => t.plain_text || t.text?.content || '').join('');
+                        } else if (prop.type === 'title' && prop.title) {
+                            content = prop.title.map(t => t.plain_text || t.text?.content || '').join('');
+                        } else if (prop.type === 'text' && prop.text) {
+                            content = prop.text.map(t => t.plain_text || t.text?.content || '').join('');
+                        }
+                    }
+
+                    // Statut
+                    if (mapping.status && page.properties[mapping.status]) {
+                        const prop = page.properties[mapping.status];
+                        if (prop.type === 'select' && prop.select) {
+                            const statusValue = prop.select.name?.toLowerCase() || '';
+                            if (statusValue.includes('draft') || statusValue.includes('brouillon')) {
+                                status = 'draft';
+                            } else if (statusValue.includes('scheduled') || statusValue.includes('programmé')) {
+                                status = 'scheduled';
+                            } else if (statusValue.includes('published') || statusValue.includes('publié')) {
+                                status = 'published';
+                            }
+                        }
+                    }
+
+                    // Date de publication
+                    if (mapping.publishDate && page.properties[mapping.publishDate]) {
+                        const prop = page.properties[mapping.publishDate];
+                        if (prop.type === 'date' && prop.date) {
+                            publishDate = prop.date.start;
+                        }
+                    }
+
+                    // Si pas de mapping, essayer de détecter automatiquement
+                    if (!mapping.title || !mapping.content) {
+                        for (const [key, prop] of Object.entries(page.properties)) {
+                            // Détecter le titre
+                            if (!title && prop.type === 'title' && prop.title && prop.title.length > 0) {
+                                title = prop.title.map(t => t.plain_text || t.text?.content || '').join('');
+                            }
+                            // Détecter le contenu - chercher "Post" en priorité
+                            if (!content) {
+                                const propName = key.toLowerCase();
+                                if (propName === 'post' || propName === 'contenu' || propName === 'content') {
+                                    if (prop.type === 'rich_text' && prop.rich_text) {
+                                        content = prop.rich_text.map(t => t.plain_text || t.text?.content || '').join('');
+                                    } else if (prop.type === 'title' && prop.title) {
+                                        content = prop.title.map(t => t.plain_text || t.text?.content || '').join('');
+                                    } else if (prop.type === 'text' && prop.text) {
+                                        content = prop.text.map(t => t.plain_text || t.text?.content || '').join('');
+                                    }
+                                }
+                            }
+                            // Fallback: n'importe quel rich_text
+                            if (!content && prop.type === 'rich_text' && prop.rich_text && prop.rich_text.length > 0) {
+                                content = prop.rich_text.map(t => t.plain_text || t.text?.content || '').join('');
+                            }
+                        }
+                    }
+                }
+
+                // Utiliser le titre comme contenu si pas de contenu
+                if (!content && title !== 'Sans titre') {
+                    content = title;
+                }
+
+                return {
+                    id: page.id,
+                    notionId: page.id,
+                    content: content || title,
+                    title: title,
+                    status: status,
+                    createdAt: publishDate || page.created_time || page.last_edited_time,
+                    lastEdited: page.last_edited_time,
+                    url: page.url,
+                    source: 'notion',
+                };
+            });
+
+            // Trier par date de création (plus récent en premier)
+            posts.sort((a, b) => {
+                const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                return dateB - dateA;
+            });
+
+            // Sauvegarder tous les posts dans localStorage
+            saveNotionPostsToStorage(posts);
+            
+            setAllNotionPosts(posts); // Tous les posts pour la liste complète
+            setSyncedPosts(posts.slice(0, 10)); // Pour la vue d'aperçu
+            setSyncStats({
+                totalPosts: posts.length,
+                drafts: posts.filter(p => p.status === 'draft').length,
+                scheduled: posts.filter(p => p.status === 'scheduled').length,
+                published: posts.filter(p => p.status === 'published').length,
+            });
+
+            console.log(`[NotionSync] ${posts.length} posts récupérés depuis Notion et sauvegardés`);
+        } catch (error) {
+            console.error('Erreur lors du chargement des posts Notion:', error);
+            setError(error.message || 'Erreur lors de la récupération des posts Notion');
+            setSyncedPosts([]);
+            setSyncStats({
+                totalPosts: 0,
+                drafts: 0,
+                scheduled: 0,
+                published: 0,
+            });
+        } finally {
+            setIsLoadingPosts(false);
+        }
     };
 
     const handleSync = async () => {
         setIsSyncing(true);
+        setError(null);
         
-        // Simuler la synchronisation
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        const newConfig = {
-            ...notionConfig,
-            lastSync: new Date().toISOString(),
-        };
-        saveNotionConfig(newConfig);
-        loadSyncedPosts();
-        
-        setIsSyncing(false);
+        try {
+            // Recharger le profil LinkedIn à chaque synchronisation
+            await loadProfile();
+            // Recharger les posts depuis Notion
+            await loadSyncedPosts();
+            
+            const newConfig = {
+                ...notionConfig,
+                lastSync: new Date().toISOString(),
+            };
+            saveNotionConfig(newConfig);
+            
+            toast.success('Synchronisation terminée');
+        } catch (error) {
+            console.error('Erreur lors de la synchronisation:', error);
+            toast.error(error.message || 'Erreur lors de la synchronisation');
+        } finally {
+            setIsSyncing(false);
+        }
     };
 
     const handleAutoSyncToggle = (checked) => {
@@ -290,6 +792,154 @@ export default function NotionSync() {
             autoSync: checked,
         };
         saveNotionConfig(newConfig);
+    };
+
+    // Mettre à jour un post dans Notion
+    const updateNotionPost = async (updatedPost) => {
+        console.log('[NotionSync] 💾 updateNotionPost appelé avec:', updatedPost);
+        
+        if (!selectedDatabase || !notionConfig.accessToken) {
+            const errorMsg = !selectedDatabase 
+                ? 'Base de données Notion non sélectionnée' 
+                : 'Token Notion non configuré';
+            console.error('[NotionSync] ❌', errorMsg);
+            throw new Error(errorMsg);
+        }
+
+        try {
+            console.log('[NotionSync] 📤 Mise à jour via API Notion...');
+            console.log('[NotionSync] Page ID:', updatedPost.id);
+            console.log('[NotionSync] Field mapping:', notionConfig.fieldMapping);
+            
+            // Construire les propriétés à mettre à jour
+            const properties = {};
+            
+            if (notionConfig.fieldMapping?.title) {
+                properties[notionConfig.fieldMapping.title] = {
+                    title: [
+                        {
+                            text: {
+                                content: updatedPost.title || updatedPost.content?.split('\n')[0]?.substring(0, 100) || 'Sans titre'
+                            }
+                        }
+                    ]
+                };
+            }
+            
+            if (notionConfig.fieldMapping?.content) {
+                properties[notionConfig.fieldMapping.content] = {
+                    rich_text: [
+                        {
+                            text: {
+                                content: updatedPost.content || ''
+                            }
+                        }
+                    ]
+                };
+            }
+            
+            if (notionConfig.fieldMapping?.status && updatedPost.status) {
+                const statusName = updatedPost.status === 'draft' ? 'Draft' : 
+                                  updatedPost.status === 'scheduled' ? 'Scheduled' : 'Published';
+                properties[notionConfig.fieldMapping.status] = {
+                    select: {
+                        name: statusName
+                    }
+                };
+            }
+            
+            console.log('[NotionSync] 📤 Propriétés à mettre à jour:', properties);
+            
+            // Mettre à jour via l'API Notion
+            const response = await notionApiCall(
+                `pages/${updatedPost.id}`,
+                'PATCH',
+                {
+                    properties: properties
+                },
+                notionConfig.accessToken
+            );
+
+            console.log('[NotionSync] 📥 Réponse Notion:', response);
+
+            if (!response || !response.success) {
+                const errorMsg = response?.error || response?.message || 'Erreur lors de la mise à jour';
+                console.error('[NotionSync] ❌ Erreur réponse:', errorMsg);
+                throw new Error(errorMsg);
+            }
+
+            // Mettre à jour dans localStorage
+            try {
+                const savedPosts = JSON.parse(localStorage.getItem('spost_notion_posts') || '[]');
+                const index = savedPosts.findIndex(p => p.id === updatedPost.id);
+                if (index !== -1) {
+                    savedPosts[index] = updatedPost;
+                    localStorage.setItem('spost_notion_posts', JSON.stringify(savedPosts));
+                    setAllNotionPosts([...savedPosts]);
+                    console.log('[NotionSync] ✅ Post mis à jour dans localStorage');
+                } else {
+                    console.warn('[NotionSync] ⚠️ Post non trouvé dans localStorage, ajout...');
+                    savedPosts.push(updatedPost);
+                    localStorage.setItem('spost_notion_posts', JSON.stringify(savedPosts));
+                    setAllNotionPosts([...savedPosts]);
+                }
+            } catch (localError) {
+                console.error('[NotionSync] ❌ Erreur sauvegarde localStorage:', localError);
+                // Ne pas bloquer si localStorage échoue
+            }
+
+            console.log('[NotionSync] ✅ Mise à jour Notion réussie');
+            return response;
+        } catch (error) {
+            console.error('[NotionSync] ❌ Erreur mise à jour Notion:', error);
+            console.error('[NotionSync] Stack:', error.stack);
+            throw error;
+        }
+    };
+
+    const handlePostSave = (updatedPost) => {
+        // Mettre à jour la liste locale
+        const savedPosts = JSON.parse(localStorage.getItem('spost_notion_posts') || '[]');
+        const index = savedPosts.findIndex(p => p.id === updatedPost.id);
+        if (index !== -1) {
+            savedPosts[index] = updatedPost;
+            localStorage.setItem('spost_notion_posts', JSON.stringify(savedPosts));
+            setAllNotionPosts([...savedPosts]);
+            loadNotionPostsFromStorage();
+        }
+        setEditingPost(null);
+    };
+
+    // Test de publication avec un texte simple
+    const handleTestPublish = async () => {
+        setIsTestPublishing(true);
+        try {
+            console.log('[NotionSync] 🧪 TEST: Publication avec "Lorem ipsum"');
+            
+            const testPost = {
+                id: 'test_' + Date.now(),
+                title: 'Test',
+                content: 'Lorem ipsum',
+                category: 'other',
+                createdAt: new Date().toISOString(),
+            };
+
+            console.log('[NotionSync] 🧪 TEST: Post créé:', testPost);
+            
+            const result = await publishPostNow(testPost);
+            
+            console.log('[NotionSync] 🧪 TEST: Résultat:', result);
+            
+            if (result.success) {
+                toast.success('✅ Test réussi ! Le texte "Lorem ipsum" a été envoyé pour publication.');
+            } else {
+                toast.error(`❌ Test échoué: ${result.error || 'Erreur inconnue'}`);
+            }
+        } catch (error) {
+            console.error('[NotionSync] 🧪 TEST: Erreur:', error);
+            toast.error(`❌ Erreur test: ${error.message || 'Erreur inconnue'}`);
+        }
+        setIsTestPublishing(false);
     };
 
     return (
@@ -310,309 +960,80 @@ export default function NotionSync() {
                     </div>
                     
                     {isConnected && (
-                        <Button 
-                            onClick={handleSync} 
-                            disabled={isSyncing || !selectedDatabase}
-                            className="bg-black hover:bg-gray-800"
-                        >
-                            {isSyncing ? (
-                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            ) : (
-                                <RefreshCw className="h-4 w-4 mr-2" />
-                            )}
-                            Synchroniser
-                        </Button>
+                        <div className="flex gap-2">
+                            <Button 
+                                onClick={handleTestPublish} 
+                                disabled={isTestPublishing}
+                                variant="outline"
+                                className="border-orange-500 text-orange-600 hover:bg-orange-50"
+                            >
+                                {isTestPublishing ? (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                ) : (
+                                    <span className="mr-2">🧪</span>
+                                )}
+                                Test Publication
+                            </Button>
+                            <Button 
+                                onClick={handleSync} 
+                                disabled={isSyncing || !selectedDatabase}
+                                className="bg-black hover:bg-gray-800"
+                            >
+                                {isSyncing ? (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                ) : (
+                                    <RefreshCw className="h-4 w-4 mr-2" />
+                                )}
+                                Synchroniser
+                            </Button>
+                        </div>
                     )}
                 </div>
 
-                <div className="grid gap-6">
-                    {/* Connexion Notion */}
+                {!isConnected || !selectedDatabase ? (
                     <Card>
-                        <CardHeader>
-                            <CardTitle className="flex items-center gap-2">
-                                <Link2 className="h-5 w-5" />
-                                Connexion à Notion
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                            {!isConnected ? (
-                                <div className="space-y-6">
-                                    <div className="text-center">
-                                        <NotionLogo className="w-16 h-16 mx-auto mb-4" />
-                                        <h3 className="text-lg font-semibold mb-2">
-                                            Connectez votre espace Notion
-                                        </h3>
-                                        <p className="text-gray-500 mb-6 max-w-md mx-auto">
-                                            Synchronisez vos posts LinkedIn avec une base de données Notion 
-                                            pour gérer votre contenu depuis votre espace de travail préféré.
-                                        </p>
-                                    </div>
-
-                                    <div className="space-y-2 max-w-md mx-auto">
-                                        <Label htmlFor="notion-token">Token d'intégration Notion</Label>
-                                        <Input
-                                            id="notion-token"
-                                            type="password"
-                                            placeholder="secret_..."
-                                            value={notionToken}
-                                            onChange={(e) => setNotionToken(e.target.value)}
-                                            disabled={isLoading}
-                                            className="font-mono text-sm"
-                                        />
-                                        <p className="text-xs text-gray-500">
-                                            Créez un token sur <a href="https://www.notion.so/my-integrations" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">notion.so/my-integrations</a>
-                                        </p>
-                                    </div>
-
-                                    {error && (
-                                        <div className="max-w-md mx-auto p-3 bg-red-50 border border-red-200 rounded-lg">
-                                            <div className="flex gap-2">
-                                                <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
-                                                <div className="flex-1">
-                                                    <p className="text-sm text-red-700 font-medium">{error}</p>
-                                                    {(error.includes('Extension') || error.includes('CORS') || error.includes('Failed to fetch')) && (
-                                                        <div className="text-xs text-red-600 mt-2 space-y-1">
-                                                            <p className="font-semibold">Solution :</p>
-                                                            <ol className="list-decimal ml-4 space-y-1">
-                                                                <li>Allez sur <code className="bg-red-100 px-1 rounded">chrome://extensions/</code></li>
-                                                                <li>Activez le "Mode développeur"</li>
-                                                                <li>Trouvez "S-Post" et cliquez sur l'icône de rechargement 🔄</li>
-                                                                <li>Revenez ici et actualisez la page (Ctrl+Shift+R)</li>
-                                                            </ol>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    <div className="text-center space-y-3">
-                                        <Button 
-                                            onClick={handleConnect}
-                                            disabled={isLoading || !notionToken.trim()}
-                                            className="bg-black hover:bg-gray-800"
-                                        >
-                                            {isLoading ? (
-                                                <>
-                                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                                    Connexion...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <NotionLogo className="w-4 h-4 mr-2" />
-                                                    Connecter Notion
-                                                </>
-                                            )}
-                                        </Button>
-                                        
-                                        <div className="text-xs text-gray-500 space-y-2">
-                                            <Button
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={async () => {
-                                                    try {
-                                                        const available = await checkExtensionAvailable();
-                                                        let message = '=== DIAGNOSTIC EXTENSION ===\n\n';
-                                                        
-                                                        if (available) {
-                                                            message += '✅ Extension S-Post détectée et active\n';
-                                                            message += '\n✅ Vous pouvez vous connecter à Notion !';
-                                                        } else {
-                                                            message += '❌ Extension non détectée\n\n';
-                                                            message += 'Vérifiez que:\n';
-                                                            message += '1. L\'extension S-Post est installée\n';
-                                                            message += '2. L\'extension est activée (chrome://extensions/)\n';
-                                                            message += '3. Rechargez l\'extension (icône 🔄)\n';
-                                                            message += '4. Actualisez cette page (Ctrl+Shift+R)';
-                                                        }
-                                                        
-                                                        alert(message);
-                                                    } catch (error) {
-                                                        alert(`Erreur lors du test: ${error.message}`);
-                                                    }
-                                                }}
-                                                className="text-xs w-full"
-                                            >
-                                                🧪 Tester l'extension
-                                            </Button>
-                                            <p className="text-xs text-gray-400 text-center">
-                                                Si l'extension n'est pas détectée, rechargez-la dans chrome://extensions/
-                                            </p>
-                                        </div>
-                                    </div>
-                                    
-                                    <div className="mt-6 p-4 bg-blue-50 rounded-lg text-left max-w-md mx-auto">
-                                        <div className="flex gap-2">
-                                            <Info className="h-5 w-5 text-blue-500 flex-shrink-0" />
-                                            <div className="text-sm text-blue-700">
-                                                <p className="font-medium mb-1">Configuration requise :</p>
-                                                <ol className="list-decimal ml-4 space-y-1">
-                                                    <li>Créez une intégration sur <a href="https://www.notion.so/my-integrations" target="_blank" rel="noopener noreferrer" className="underline">notion.so/my-integrations</a></li>
-                                                    <li>Partagez votre base de données avec l'intégration</li>
-                                                    <li>Copiez le token d'intégration (commence par "secret_")</li>
-                                                </ol>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                                                <Check className="h-5 w-5 text-green-600" />
-                                            </div>
-                                            <div>
-                                                <p className="font-medium text-green-900">Connecté à Notion</p>
-                                                <p className="text-sm text-green-700">{notionConfig.workspaceName}</p>
-                                            </div>
-                                        </div>
-                                        <Button variant="outline" size="sm" onClick={handleDisconnect}>
-                                            <X className="h-4 w-4 mr-1" />
-                                            Déconnecter
-                                        </Button>
-                                    </div>
-                                    
-                                    {notionConfig.lastSync && (
-                                        <p className="text-sm text-gray-500">
-                                            Dernière synchronisation : {format(new Date(notionConfig.lastSync), "d MMMM yyyy 'à' HH:mm", { locale: fr })}
-                                        </p>
-                                    )}
-                                </div>
-                            )}
+                        <CardContent className="pt-6">
+                            <div className="text-center py-8">
+                                <NotionLogo className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                                <h3 className="text-lg font-semibold mb-2 text-gray-700">
+                                    Configuration requise
+                                </h3>
+                                <p className="text-gray-500 mb-6 max-w-md mx-auto">
+                                    Pour utiliser la synchronisation Notion, veuillez configurer votre connexion dans les paramètres.
+                                </p>
+                                <Button 
+                                    onClick={() => navigate('/settings')}
+                                    className="bg-black hover:bg-gray-800"
+                                >
+                                    <Settings className="h-4 w-4 mr-2" />
+                                    Aller aux paramètres
+                                </Button>
+                            </div>
                         </CardContent>
                     </Card>
-
-                    {/* Sélection de la base de données */}
-                    {isConnected && (
-                        <Card>
-                            <CardHeader>
-                                <div className="flex items-center justify-between">
-                                    <CardTitle className="flex items-center gap-2">
-                                        <Database className="h-5 w-5" />
-                                        Base de données
-                                    </CardTitle>
-                                    <Button 
-                                        variant="outline" 
+                ) : (
+                    <div className="space-y-6">
+                        {/* Notifications pour configuration manquante */}
+                        {(!notionConfig.fieldMapping || !notionConfig.fieldMapping.content) && (
+                            <Alert className="border-amber-500 bg-amber-50">
+                                <AlertCircle className="h-4 w-4 text-amber-600" />
+                                <AlertTitle className="text-amber-900">Configuration du mapping des champs requise</AlertTitle>
+                                <AlertDescription className="text-amber-800">
+                                    Le mapping des champs n'est pas configuré. Veuillez configurer le mapping des champs pour synchroniser vos posts Notion.
+                                    <Button
+                                        variant="outline"
                                         size="sm"
-                                        onClick={() => loadDatabases()}
-                                        disabled={isLoadingDatabases}
+                                        className="ml-4 mt-2"
+                                        onClick={() => navigate('/settings?tab=integration')}
                                     >
-                                        {isLoadingDatabases ? (
-                                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                        ) : (
-                                            <RefreshCw className="h-4 w-4 mr-2" />
-                                        )}
-                                        Actualiser
+                                        <MapPin className="h-4 w-4 mr-2" />
+                                        Configurer le mapping
                                     </Button>
-                                </div>
-                            </CardHeader>
-                            <CardContent>
-                                {isLoadingDatabases ? (
-                                    <div className="text-center py-6">
-                                        <Loader2 className="h-8 w-8 mx-auto mb-3 animate-spin text-gray-400" />
-                                        <p className="text-gray-500">Chargement des bases de données...</p>
-                                    </div>
-                                ) : databases.length === 0 ? (
-                                    <div className="text-center py-6 text-gray-500">
-                                        <Database className="h-12 w-12 mx-auto mb-3 opacity-30" />
-                                        <p className="font-medium mb-1">Aucune base de données trouvée</p>
-                                        <p className="text-sm">Partagez une base avec votre intégration Notion</p>
-                                        {error && (
-                                            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-left max-w-md mx-auto">
-                                                <div className="flex gap-2">
-                                                    <AlertCircle className="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
-                                                    <p className="text-xs text-red-700">{error}</p>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                ) : (
-                                    <div className="space-y-2">
-                                        {databases.map((db) => (
-                                            <button
-                                                key={db.id}
-                                                onClick={() => selectDatabase(db)}
-                                                className={`w-full flex items-center justify-between p-3 rounded-lg border transition-colors ${
-                                                    selectedDatabase?.id === db.id
-                                                        ? 'border-black bg-gray-50'
-                                                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                                                }`}
-                                            >
-                                                <div className="flex items-center gap-3">
-                                                    <span className="text-2xl">{db.icon}</span>
-                                                    <span className="font-medium">{db.title}</span>
-                                                </div>
-                                                {selectedDatabase?.id === db.id && (
-                                                    <Check className="h-5 w-5 text-green-600" />
-                                                )}
-                                            </button>
-                                        ))}
-                                        
-                                        <Button variant="outline" className="w-full mt-3">
-                                            <Plus className="h-4 w-4 mr-2" />
-                                            Créer une nouvelle base
-                                        </Button>
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
-                    )}
-
-                    {/* Paramètres de synchronisation */}
-                    {isConnected && selectedDatabase && (
-                        <Card>
-                            <CardHeader>
-                                <CardTitle className="flex items-center gap-2">
-                                    <Settings className="h-5 w-5" />
-                                    Paramètres de synchronisation
-                                </CardTitle>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <p className="font-medium">Synchronisation automatique</p>
-                                        <p className="text-sm text-gray-500">
-                                            Synchroniser automatiquement toutes les {notionConfig.syncInterval} minutes
-                                        </p>
-                                    </div>
-                                    <Switch
-                                        checked={notionConfig.autoSync}
-                                        onCheckedChange={handleAutoSyncToggle}
-                                    />
-                                </div>
-                                
-                                <div className="border-t pt-4">
-                                    <Label className="text-sm font-medium">Mapping des champs</Label>
-                                    <div className="mt-3 space-y-2">
-                                        <div className="flex items-center justify-between text-sm p-2 bg-gray-50 rounded">
-                                            <span className="text-gray-600">Titre</span>
-                                            <ChevronRight className="h-4 w-4 text-gray-400" />
-                                            <span className="font-medium">Name (Title)</span>
-                                        </div>
-                                        <div className="flex items-center justify-between text-sm p-2 bg-gray-50 rounded">
-                                            <span className="text-gray-600">Contenu</span>
-                                            <ChevronRight className="h-4 w-4 text-gray-400" />
-                                            <span className="font-medium">Content (Text)</span>
-                                        </div>
-                                        <div className="flex items-center justify-between text-sm p-2 bg-gray-50 rounded">
-                                            <span className="text-gray-600">Statut</span>
-                                            <ChevronRight className="h-4 w-4 text-gray-400" />
-                                            <span className="font-medium">Status (Select)</span>
-                                        </div>
-                                        <div className="flex items-center justify-between text-sm p-2 bg-gray-50 rounded">
-                                            <span className="text-gray-600">Date de publication</span>
-                                            <ChevronRight className="h-4 w-4 text-gray-400" />
-                                            <span className="font-medium">Publish Date (Date)</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </CardContent>
-                        </Card>
-                    )}
-
-                    {/* Statistiques de synchronisation */}
-                    {isConnected && selectedDatabase && (
+                                </AlertDescription>
+                            </Alert>
+                        )}
+                        
+                        {/* Statistiques de synchronisation */}
                         <div className="grid grid-cols-4 gap-4">
                             <Card>
                                 <CardContent className="p-4 text-center">
@@ -643,60 +1064,279 @@ export default function NotionSync() {
                                 </CardContent>
                             </Card>
                         </div>
-                    )}
 
-                    {/* Posts synchronisés */}
-                    {isConnected && selectedDatabase && syncedPosts.length > 0 && (
+                        {/* Posts synchronisés avec filtres et pagination */}
                         <Card>
-                            <CardHeader>
-                                <CardTitle className="flex items-center justify-between">
-                                    <span className="flex items-center gap-2">
-                                        <FileText className="h-5 w-5" />
-                                        Posts synchronisés
-                                    </span>
-                                    <Button variant="outline" size="sm" asChild>
-                                        <a href="/allposts">
-                                            Voir tous les posts
-                                            <ExternalLink className="h-4 w-4 ml-2" />
-                                        </a>
-                                    </Button>
-                                </CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                <div className="space-y-2">
-                                    {syncedPosts.map((post, index) => (
-                                        <div 
-                                            key={post.id || index}
-                                            className="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
-                                        >
-                                            <div className="flex-1 min-w-0">
-                                                <p className="font-medium truncate">
-                                                    {post.content?.substring(0, 60) || 'Sans titre'}...
-                                                </p>
-                                                <p className="text-sm text-gray-500">
-                                                    {post.createdAt ? format(new Date(post.createdAt), "d MMM yyyy", { locale: fr }) : 'Date inconnue'}
-                                                </p>
-                                            </div>
-                                            <Badge variant={
-                                                post.status === 'draft' ? 'secondary' :
-                                                post.status === 'scheduled' ? 'outline' : 'default'
-                                            }>
-                                                {post.status === 'draft' ? 'Brouillon' :
-                                                 post.status === 'scheduled' ? 'Programmé' : 'Publié'}
-                                            </Badge>
+                            <CardContent className="p-0">
+                                {/* Barre de recherche et filtres */}
+                                <div className="border-b px-6 py-4 bg-gray-50">
+                                    <div className="flex flex-wrap items-center gap-4">
+                                        {/* Champ de recherche */}
+                                        <div className="relative flex-1 min-w-[200px] max-w-md">
+                                            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+                                            <Input
+                                                type="text"
+                                                placeholder="Rechercher un article..."
+                                                value={searchQuery}
+                                                onChange={(e) => setSearchQuery(e.target.value)}
+                                                className="pl-10 bg-white border-gray-200"
+                                            />
+                                            {searchQuery && (
+                                                <button 
+                                                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                                                    onClick={() => setSearchQuery('')}
+                                                >
+                                                    <X className="h-4 w-4" />
+                                                </button>
+                                            )}
                                         </div>
-                                    ))}
+                                        
+                                        {/* Filtre par statut */}
+                                        <div className="flex items-center gap-2">
+                                            <Filter className="h-4 w-4 text-gray-500" />
+                                            <select
+                                                value={statusFilter}
+                                                onChange={(e) => setStatusFilter(e.target.value)}
+                                                className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value="all">Tous les statuts</option>
+                                                <option value="draft">Brouillons</option>
+                                                <option value="scheduled">Programmés</option>
+                                                <option value="published">Publiés</option>
+                                            </select>
+                                        </div>
+                                        
+                                        {/* Filtre par période */}
+                                        <div className="flex items-center gap-2">
+                                            <Calendar className="h-4 w-4 text-gray-500" />
+                                            <select
+                                                value={periodFilter}
+                                                onChange={(e) => setPeriodFilter(e.target.value)}
+                                                className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value="all">Toutes les périodes</option>
+                                                <option value="week">7 derniers jours</option>
+                                                <option value="month">30 derniers jours</option>
+                                                <option value="quarter">90 derniers jours</option>
+                                                <option value="year">Cette année</option>
+                                            </select>
+                                        </div>
+                                        
+                                        {/* Tri */}
+                                        <div className="flex items-center gap-2">
+                                            <select
+                                                value={sortBy}
+                                                onChange={(e) => setSortBy(e.target.value)}
+                                                className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value="date">Date</option>
+                                                <option value="title">Titre</option>
+                                                <option value="status">Statut</option>
+                                            </select>
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
+                                                className="px-2"
+                                            >
+                                                <ChevronDown className={`h-4 w-4 transition-transform ${sortOrder === 'asc' ? 'rotate-180' : ''}`} />
+                                            </Button>
+                                        </div>
+                                        
+                                        {/* Sélecteur d'éléments par page */}
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-sm text-gray-500">Afficher</span>
+                                            <select
+                                                value={itemsPerPage}
+                                                onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                                                className="border border-gray-200 rounded-lg px-2 py-1 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value={10}>10</option>
+                                                <option value={25}>25</option>
+                                                <option value={50}>50</option>
+                                                <option value={100}>100</option>
+                                            </select>
+                                        </div>
+                                        
+                                        {/* Compteur de résultats */}
+                                        <div className="text-sm text-gray-500 ml-auto">
+                                            {filteredNotionPosts.length} article{filteredNotionPosts.length > 1 ? 's' : ''}
+                                            {(searchQuery || periodFilter !== 'all' || statusFilter !== 'all') && ` sur ${allNotionPosts.length}`}
+                                        </div>
+                                        
+                                    </div>
+                                </div>
+                                
+                                {/* Liste des posts */}
+                                <div className="p-6">
+                                    {isLoadingPosts ? (
+                                        <div className="text-center py-12">
+                                            <Loader2 className="h-8 w-8 mx-auto mb-3 animate-spin text-gray-400" />
+                                            <p className="text-gray-500">Chargement des posts depuis Notion...</p>
+                                        </div>
+                                    ) : allNotionPosts.length === 0 ? (
+                                        <div className="text-center py-12 text-gray-500">
+                                            <FileText className="h-16 w-16 mx-auto mb-4 opacity-30" />
+                                            <p className="font-medium mb-1 text-lg">Aucun post trouvé dans Notion</p>
+                                            <p className="text-sm">Les posts affichés ici proviennent uniquement de votre base Notion</p>
+                                        </div>
+                                    ) : filteredNotionPosts.length === 0 ? (
+                                        <div className="text-center py-12 text-gray-500">
+                                            <FileText className="h-16 w-16 mx-auto mb-4 opacity-30" />
+                                            <p className="font-medium mb-1 text-lg">Aucun résultat</p>
+                                            <p className="text-sm">Aucun article ne correspond à vos critères de recherche</p>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="space-y-3">
+                                                {paginatedNotionPosts.map((post, index) => (
+                                                    <div 
+                                                        key={post.id || index}
+                                                        className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors border border-gray-200"
+                                                    >
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="font-medium mb-1">
+                                                                {post.title || 'Sans titre'}
+                                                            </p>
+                                                            <div className="flex items-center gap-4 text-xs text-gray-500">
+                                                                {post.createdAt && (
+                                                                    <span className="flex items-center gap-1">
+                                                                        <Calendar className="h-3 w-3" />
+                                                                        {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true, locale: fr })}
+                                                                    </span>
+                                                                )}
+                                                                {post.lastEdited && (
+                                                                    <span className="flex items-center gap-1">
+                                                                        <Clock className="h-3 w-3" />
+                                                                        Modifié {formatDistanceToNow(new Date(post.lastEdited), { addSuffix: true, locale: fr })}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center gap-3 ml-4">
+                                                            <Button 
+                                                                variant="outline" 
+                                                                size="sm"
+                                                                onClick={() => setEditingPost(post)}
+                                                            >
+                                                                <Edit2 className="h-4 w-4 mr-2" />
+                                                                Éditer
+                                                            </Button>
+                                                            <Badge variant={
+                                                                post.status === 'draft' ? 'secondary' :
+                                                                post.status === 'scheduled' ? 'outline' : 'default'
+                                                            }>
+                                                                {post.status === 'draft' ? 'Brouillon' :
+                                                                 post.status === 'scheduled' ? 'Programmé' : 'Publié'}
+                                                            </Badge>
+                                                            {post.url && (
+                                                                <Button variant="ghost" size="sm" asChild>
+                                                                    <a href={post.url} target="_blank" rel="noopener noreferrer">
+                                                                        <ExternalLink className="h-4 w-4" />
+                                                                    </a>
+                                                                </Button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            
+                                            {/* Pagination */}
+                                            {totalPages > 1 && (
+                                                <div className="mt-6 flex items-center justify-between border-t pt-4">
+                                                    <div className="text-sm text-gray-500">
+                                                        Affichage {((currentPage - 1) * itemsPerPage) + 1} - {Math.min(currentPage * itemsPerPage, filteredNotionPosts.length)} sur {filteredNotionPosts.length} articles
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            onClick={() => goToPage(currentPage - 1)}
+                                                            disabled={currentPage === 1}
+                                                        >
+                                                            <ChevronLeft className="h-4 w-4" />
+                                                        </Button>
+                                                        
+                                                        {/* Pages */}
+                                                        <div className="flex items-center gap-1">
+                                                            {currentPage > 3 && (
+                                                                <>
+                                                                    <Button
+                                                                        variant={currentPage === 1 ? "default" : "outline"}
+                                                                        size="sm"
+                                                                        onClick={() => goToPage(1)}
+                                                                        className="h-8 w-8 p-0"
+                                                                    >
+                                                                        1
+                                                                    </Button>
+                                                                    {currentPage > 4 && <span className="text-gray-400 px-1">...</span>}
+                                                                </>
+                                                            )}
+                                                            
+                                                            {Array.from({ length: totalPages }, (_, i) => i + 1)
+                                                                .filter(page => page >= currentPage - 2 && page <= currentPage + 2)
+                                                                .map(page => (
+                                                                    <Button
+                                                                        key={page}
+                                                                        variant={currentPage === page ? "default" : "outline"}
+                                                                        size="sm"
+                                                                        onClick={() => goToPage(page)}
+                                                                        className={`h-8 w-8 p-0 ${currentPage === page ? 'bg-blue-600 text-white' : ''}`}
+                                                                    >
+                                                                        {page}
+                                                                    </Button>
+                                                                ))}
+                                                            
+                                                            {currentPage < totalPages - 2 && (
+                                                                <>
+                                                                    {currentPage < totalPages - 3 && <span className="text-gray-400 px-1">...</span>}
+                                                                    <Button
+                                                                        variant={currentPage === totalPages ? "default" : "outline"}
+                                                                        size="sm"
+                                                                        onClick={() => goToPage(totalPages)}
+                                                                        className="h-8 w-8 p-0"
+                                                                    >
+                                                                        {totalPages}
+                                                                    </Button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                        
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            onClick={() => goToPage(currentPage + 1)}
+                                                            disabled={currentPage === totalPages}
+                                                        >
+                                                            <ChevronRight className="h-4 w-4" />
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
-                    )}
-                </div>
+                    </div>
+                )}
 
                 {/* Footer */}
                 <div className="text-center py-4 text-xs text-gray-400 border-t bg-gray-50 mt-6">
-                    S-PostBO v2.4.0 • Powered by S-Post Extension
+                    S-PostBO v2.4.0 • Extension S-Post v2.4.0
                 </div>
             </div>
+
+            {/* Éditeur de post Notion */}
+            {editingPost && (
+                <NotionPostEditor
+                    notionPost={editingPost}
+                    profile={profile}
+                    onClose={() => setEditingPost(null)}
+                    onSave={handlePostSave}
+                    onUpdateNotion={updateNotionPost}
+                />
+            )}
         </div>
     );
 }

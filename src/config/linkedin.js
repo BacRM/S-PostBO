@@ -1,8 +1,9 @@
 // Configuration LinkedIn OAuth 2.0
+// Utilise les mêmes credentials que S-Plugin (localhost:3000)
 export const LINKEDIN_CONFIG = {
-  CLIENT_ID: '78veu44ooaeouq',
-  CLIENT_SECRET: 'WPL_AP1.5nxgxsJHWL4Frqhn.WAZ+3Q==',
-  REDIRECT_URI: 'http://localhost:5173/callback',
+  CLIENT_ID: '788o101klmxmq4', // Même que S-Plugin
+  CLIENT_SECRET: 'WPL_AP1.jvwuoOV4tcRnWMHK.Y2m+fA==', // Même que S-Plugin
+  REDIRECT_URI: 'http://localhost:5174/callback', // Port 5174 pour S-PostBO
   
   // Scopes disponibles avec les produits activés
   SCOPES: [
@@ -142,6 +143,7 @@ export function getUser() {
   const data = localStorage.getItem('linkedin_user');
   return data ? JSON.parse(data) : null;
 }
+
 
 
 

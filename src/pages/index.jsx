@@ -14,7 +14,11 @@ import Profile from "./Profile";
 
 import NotionSync from "./NotionSync";
 
+import Settings from "./Settings";
+
 import Callback from "./Callback";
+
+import CreatePost from "./CreatePost";
 
 import { BrowserRouter as Router, Route, Routes, useLocation } from 'react-router-dom';
 
@@ -66,13 +70,16 @@ function PagesContent() {
                 <Route path="/allposts" element={<AllPosts />} />
                 <Route path="/calendar" element={<Calendar />} />
                 <Route path="/profile" element={<Profile />} />
+                <Route path="/settings" element={<Settings />} />
                 <Route path="/notion" element={<NotionSync />} />
+                <Route path="/create-post" element={<CreatePost />} />
                 
                 {/* Routes compatibilité */}
                 <Route path="/Stats" element={<Stats />} />
                 <Route path="/AllPosts" element={<AllPosts />} />
                 <Route path="/Calendar" element={<Calendar />} />
                 <Route path="/Profile" element={<Profile />} />
+                <Route path="/Settings" element={<Settings />} />
                 <Route path="/Notion" element={<NotionSync />} />
             </Routes>
         </Layout>

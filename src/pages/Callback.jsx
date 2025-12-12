@@ -52,9 +52,12 @@ export default function Callback() {
         // Nettoyer le state
         localStorage.removeItem('linkedin_oauth_state');
         
-        // Rediriger vers la page principale
+        // Rediriger vers create-post si on vient de là, sinon allposts
+        const returnTo = localStorage.getItem('oauth_return_to') || '/allposts';
+        localStorage.removeItem('oauth_return_to');
+        
         setTimeout(() => {
-          navigate('/allposts');
+          navigate(returnTo);
         }, 1000);
         
       } catch (err) {
@@ -106,6 +109,7 @@ export default function Callback() {
     </div>
   );
 }
+
 
 
 

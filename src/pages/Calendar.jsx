@@ -15,6 +15,7 @@ import {
 } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import Sidebar from '../components/dashboard/Sidebar';
+import { APP_VERSION, EXTENSION_VERSION } from '@/config/version';
 
 const STATUS_COLORS = {
     draft: 'bg-gray-200 text-gray-700 border-l-4 border-gray-400',
@@ -562,7 +563,7 @@ export default function Calendar() {
 
             {/* Footer */}
             <div className="fixed bottom-0 left-64 right-0 text-center py-2 text-xs text-gray-400 border-t bg-gray-50">
-                S-PostBO v2.4.0 • Powered by S-Post Extension
+                S-PostBO v{APP_VERSION} • Extension S-Post v{EXTENSION_VERSION}
             </div>
         </div>
     );

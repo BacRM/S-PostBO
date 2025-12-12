@@ -11,6 +11,7 @@ import {
     BarChart3, Users, Sparkles, Send, BookMarked
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, AreaChart, Area } from 'recharts';
+import { APP_VERSION } from "@/config/version";
 
 // ============================================
 // Hook S-Post Extension
@@ -751,7 +752,7 @@ export default function Home() {
             {/* Footer */}
             <footer className="border-t bg-white mt-8">
                 <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between text-xs text-slate-400">
-                    <span>S-PostBO v2.4.0 • Inspiré par PerfectPost</span>
+                    <span>S-PostBO v{APP_VERSION} • Inspiré par PerfectPost</span>
                     <span>Mode développement local</span>
                 </div>
             </footer>

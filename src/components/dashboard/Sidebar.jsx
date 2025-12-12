@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { 
     User, FileText, Calendar, 
     BarChart3, Linkedin, ExternalLink,
-    RefreshCw, Database
+    RefreshCw, Database, Plus
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { APP_VERSION } from "@/config/version";
 
 // Icône Notion simplifiée
 const NotionIcon = ({ className }) => (
@@ -18,6 +19,7 @@ const NotionIcon = ({ className }) => (
 const menuItems = [
     { icon: BarChart3, label: 'Mes Stats', path: '/stats', key: 'stats' },
     { icon: FileText, label: 'Analyse des Posts', path: '/allposts', key: 'allposts' },
+    { icon: Plus, label: 'Créer un Post', path: '/create-post', key: 'create-post' },
     { icon: Calendar, label: 'Ma Programmation', path: '/calendar', key: 'calendar' },
     { icon: Database, label: 'Synch Notion', path: '/notion', key: 'notion' },
 ];
@@ -41,10 +43,22 @@ export default function Sidebar({ activePage }) {
     
     return (
         <div className="w-64 bg-white border-r min-h-screen flex flex-col">
-            {/* User Header - Lien vers profil */}
-            <Link to="/profile" className="block p-4 border-b hover:bg-gray-50 transition-colors">
+            {/* Logo S-POST-AI */}
+            <div className="p-1 border-b bg-gray-50 flex items-center justify-center">
+                <img 
+                    src="/images/spost-logo.png" 
+                    alt="S-POST-AI" 
+                    className="w-full h-auto max-h-20 object-contain"
+                    onError={(e) => {
+                        e.target.style.display = 'none';
+                    }}
+                />
+            </div>
+            
+            {/* User Header - Lien vers paramètres */}
+            <Link to="/settings" className="block p-4 border-b hover:bg-gray-50 transition-colors">
                 <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white font-semibold text-lg">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white font-semibold text-lg flex-shrink-0">
                         {profile?.firstName?.charAt(0) || 'S'}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -121,6 +135,18 @@ export default function Sidebar({ activePage }) {
                     <RefreshCw className="h-3 w-3 mr-2" />
                     Synchroniser
                 </Button>
+            </div>
+
+            {/* Footer avec version */}
+            <div className="p-4 border-t bg-gray-50 mt-auto">
+                <div className="text-center">
+                    <p className="text-xs text-gray-500">
+                        S-PostBO v{APP_VERSION}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-1">
+                        © {new Date().getFullYear()} S-Post
+                    </p>
+                </div>
             </div>
         </div>
     );

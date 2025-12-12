@@ -150,7 +150,7 @@ export default function Profile() {
 
                 {/* Footer */}
                 <div className="text-center py-2 text-xs text-gray-400 border-t bg-gray-50 mt-6">
-                    S-PostBO v2.4.0 • Powered by S-Post Extension
+                    S-PostBO v2.4.0 • Extension S-Post v2.4.0
                 </div>
             </div>
         </div>
